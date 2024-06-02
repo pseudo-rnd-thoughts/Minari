@@ -1,6 +1,8 @@
 import gymnasium as gym
 import h5py
 import pytest
+
+pytest.importorskip("agilerl")
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils.minari_utils import MinariToAgileBuffer, MinariToAgileDataset
 
