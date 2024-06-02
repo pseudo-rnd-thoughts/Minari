@@ -196,9 +196,8 @@ def _add_episode_to_group(episode_buffer: Dict, episode_group: h5py.Group):
             dict_data = {f"_index_{i}": subdata for i, subdata in enumerate(data)}
             episode_group_to_clear = _get_from_h5py(episode_group, key)
             _add_episode_to_group(dict_data, episode_group_to_clear)
-        elif all(
-            isinstance(entry, OrderedDict) for entry in data
-        ):  # list of OrderedDict
+        elif all(isinstance(entry, (OrderedDict, dict)) for entry in data):
+            # list of OrderedDict
             dict_data = {key: [entry[key] for entry in data] for key in data[0].keys()}
             episode_group_to_clear = _get_from_h5py(episode_group, key)
             _add_episode_to_group(dict_data, episode_group_to_clear)

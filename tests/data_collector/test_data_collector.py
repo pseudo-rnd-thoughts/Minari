@@ -67,6 +67,7 @@ def get_single_step_from_episode(episode: EpisodeData, index: int) -> EpisodeDat
         observation = _get_step_from_tuple_space(episode.observations, index)
     else:
         observation = episode.observations[index]
+
     if isinstance(episode.actions, dict):
         action = _get_step_from_dictionary_space(episode.actions, index)
     elif isinstance(episode.actions, tuple):
