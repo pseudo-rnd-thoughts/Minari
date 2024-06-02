@@ -5,7 +5,7 @@ import importlib.metadata
 import os
 import re
 import warnings
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -17,8 +17,10 @@ from gymnasium.wrappers import RecordEpisodeStatistics
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import Version
 
+from minari.data_collector.episode_buffer import EpisodeBuffer
 from minari.dataset.minari_dataset import MinariDataset
 from minari.dataset.minari_storage import MinariStorage
+from minari.serialization import deserialize_space
 from minari.storage.datasets_root_dir import get_dataset_path
 
 
@@ -169,7 +171,14 @@ def validate_datasets_to_combine(
 
     """
     # get first among the dataset's env_spec which is not None
-    first_not_none_env_spec = next((dataset.spec.env_spec for dataset in datasets_to_combine if dataset.spec.env_spec is not None), None)
+    first_not_none_env_spec = next(
+        (
+            dataset.spec.env_spec
+            for dataset in datasets_to_combine
+            if dataset.spec.env_spec is not None
+        ),
+        None,
+    )
 
     # early return where all datasets have no env_spec
     if first_not_none_env_spec is None:
@@ -199,7 +208,9 @@ def validate_datasets_to_combine(
                     "The datasets to be combined have different values for `env_spec` attribute."
                 )
         else:
-            raise ValueError("Cannot combine datasets having env_spec with those having no env_spec.")
+            raise ValueError(
+                "Cannot combine datasets having env_spec with those having no env_spec."
+            )
 
     return common_env_spec
 
@@ -244,9 +255,11 @@ def combine_datasets(datasets_to_combine: List[MinariDataset], new_dataset_id: s
     new_dataset_path = get_dataset_path(new_dataset_id)
     new_dataset_path.mkdir()
     new_storage = MinariStorage.new(
-        new_dataset_path.joinpath("data"), env_spec=combined_dataset_env_spec,
+        new_dataset_path.joinpath("data"),
+        env_spec=combined_dataset_env_spec,
         observation_space=datasets_to_combine[0].observation_space,
-        action_space=datasets_to_combine[0].action_space
+        action_space=datasets_to_combine[0].action_space,
+        data_format=datasets_to_combine[0].storage.FORMAT,
     )
 
     new_storage.update_metadata(
@@ -303,14 +316,15 @@ def get_average_reference_score(
     policy: Callable[[ObsType], ActType],
     num_episodes: int,
 ) -> float:
-
     env = RecordEpisodeStatistics(env, num_episodes)
     episode_returns = []
     obs, _ = env.reset(seed=123)
     for _ in range(num_episodes):
         while True:
             action = policy(obs)
-            obs, _, terminated, truncated, info = env.step(action)  # pyright: ignore[reportGeneralTypeIssues]
+            obs, _, terminated, truncated, info = env.step(
+                action  # pyright: ignore[reportGeneralTypeIssues]
+            )
             if terminated or truncated:
                 episode_returns.append(info["episode"]["r"])
                 obs, _ = env.reset()
@@ -347,6 +361,7 @@ def _generate_dataset_metadata(
     expert_policy: Optional[Callable[[ObsType], ActType]],
     num_episodes_average_score: int,
     minari_version: Optional[str],
+    description: Optional[str],
 ) -> Dict[str, Any]:
     """Return the metadata dictionary of the dataset."""
     dataset_metadata: Dict[str, Any] = {
@@ -385,6 +400,14 @@ def _generate_dataset_metadata(
     else:
         dataset_metadata["algorithm_name"] = algorithm_name
 
+    if description is None:
+        warnings.warn(
+            "`description` is set to None. For longevity purposes it is highly recommended to provide a description of the dataset",
+            UserWarning,
+        )
+    else:
+        dataset_metadata["description"] = description
+
     if minari_version is None:
         version = Version(__version__)
         release = version.release
@@ -411,8 +434,8 @@ def _generate_dataset_metadata(
 
     if eval_env is None:
         warnings.warn(
-            f"`eval_env` is set to None. If another environment is intended to be used for evaluation please specify corresponding Gymnasium environment (gym.Env | gym.envs.registration.EnvSpec).\
-              If None the environment used to collect the data (`env={env_spec}`) will be used for this purpose.",
+            f"`eval_env` is set to None. If another environment is intended to be used for evaluation please specify corresponding Gymnasium environment (gym.Env | gym.envs.registration.EnvSpec). "
+            f"If None the environment used to collect the data (`env={env_spec}`) will be used for this purpose.",
             UserWarning,
         )
         eval_env_spec = env_spec
@@ -436,7 +459,9 @@ def _generate_dataset_metadata(
             UserWarning,
         )
 
-    if eval_env_spec is not None and (expert_policy is not None or ref_max_score is not None):
+    if eval_env_spec is not None and (
+        expert_policy is not None or ref_max_score is not None
+    ):
         env_ref_score = gym.make(eval_env_spec)
         if ref_min_score is None:
             ref_min_score = get_average_reference_score(
@@ -456,7 +481,7 @@ def _generate_dataset_metadata(
 
 def create_dataset_from_buffers(
     dataset_id: str,
-    buffer: List[Dict[str, Union[list, Dict]]],
+    buffer: List[EpisodeBuffer],
     env: Optional[str | gym.Env | EnvSpec] = None,
     eval_env: Optional[str | gym.Env | EnvSpec] = None,
     algorithm_name: Optional[str] = None,
@@ -470,6 +495,8 @@ def create_dataset_from_buffers(
     ref_max_score: Optional[float] = None,
     expert_policy: Optional[Callable[[ObsType], ActType]] = None,
     num_episodes_average_score: int = 100,
+    description: Optional[str] = None,
+    data_format: Optional[str] = None,
 ):
     """Create Minari dataset from a list of episode dictionary buffers.
 
@@ -477,18 +504,9 @@ def create_dataset_from_buffers(
     ``(env_name-)(dataset_name)(-v(version))`` where ``env_name`` identifies the name of the environment used to generate the dataset ``dataset_name``.
     This ``dataset_id`` is used to load the Minari datasets with :meth:`minari.load_dataset`.
 
-    Each episode dictionary buffer must have the following items:
-        * `observations`: np.ndarray of step observations. shape = (total_episode_steps + 1, (observation_shape)). Should include initial and final observation
-        * `actions`: np.ndarray of step action. shape = (total_episode_steps, (action_shape)).
-        * `rewards`: np.ndarray of step rewards. shape = (total_episode_steps, 1).
-        * `terminations`: np.ndarray of step terminations. shape = (total_episode_steps, 1).
-        * `truncations`: np.ndarray of step truncations. shape = (total_episode_steps, 1).
-
-    Other additional items can be added as long as the values are np.ndarray's or other nested dictionaries.
-
     Args:
         dataset_id (str): name id to identify Minari dataset.
-        buffer (list[Dict[str, Union[list, Dict]]]): list of episode dictionaries with data.
+        buffer (list[EpisodeBuffer]): list of episode buffer with data.
         env (Optional[str|gym.Env|EnvSpec]): Gymnasium environment(gym.Env)/environment id(str)/environment spec(EnvSpec) used to collect the buffer data. Defaults to None.
         eval_env (Optional[str|gym.Env|EnvSpec]): Gymnasium environment(gym.Env)/environment id(str)/environment spec(EnvSpec) to use for evaluation with the dataset. After loading the dataset, the environment can be recovered as follows: `MinariDataset.recover_environment(eval_env=True).
                                                 If None, and if the `env` used to collect the buffer data is available, latter will be used for evaluation.
@@ -506,6 +524,8 @@ def create_dataset_from_buffers(
         action_space (Optional[gym.spaces.Space]): action space of the environment. If None (default) use the environment action space.
         observation_space (Optional[gym.spaces.Space]): observation space of the environment. If None (default) use the environment observation space.
         minari_version (Optional[str], optional): Minari version specifier compatible with the dataset. If None (default) use the installed Minari version.
+        description (Optional[str], optional): description of the dataset being created. Defaults to None.
+        data_format (str, optional): Data format to store the data in the Minari dataset. If None (defaults), it will use the default format of MinariStorage.
 
     Returns:
         MinariDataset
@@ -520,7 +540,9 @@ def create_dataset_from_buffers(
         env_spec = env.spec
     elif env is None:
         if observation_space is None or action_space is None:
-            raise ValueError("Both observation space and action space must be provided, if env is None")
+            raise ValueError(
+                "Both observation space and action space must be provided, if env is None"
+            )
         env_spec = None
     else:
         raise ValueError("The `env` argument must be of types str|EnvSpec|gym.Env|None")
@@ -547,20 +569,23 @@ def create_dataset_from_buffers(
         expert_policy,
         num_episodes_average_score,
         minari_version,
+        description,
     )
 
+    data_format_kwarg = {"data_format": data_format} if data_format is not None else {}
     storage = MinariStorage.new(
         dataset_path,
         observation_space=observation_space,
         action_space=action_space,
         env_spec=env_spec,
+        **data_format_kwarg,
     )
 
     # adding `update_metadata` before hand too, as for small envs, the absence of metadata is causing a difference of some 10ths of MBs leading to errors in unit tests.
     storage.update_metadata(metadata)
     storage.update_episodes(buffer)
 
-    metadata['dataset_size'] = storage.get_size()
+    metadata["dataset_size"] = storage.get_size()
     storage.update_metadata(metadata)
 
     return MinariDataset(storage)
@@ -613,31 +638,32 @@ def get_env_spec_dict(env_spec: EnvSpec) -> Dict[str, str]:
     if action_space_table is not None:
         md_dict["Action Space"] = f"`{re.sub(' +', ' ', action_space_table)}`"
 
-    md_dict.update({
-        "entry_point": f"`{env_spec.entry_point}`",
-        "max_episode_steps": str(env_spec.max_episode_steps),
-        "reward_threshold": str(env_spec.reward_threshold),
-        "nondeterministic": f"`{env_spec.nondeterministic}`",
-        "order_enforce": f"`{env_spec.order_enforce}`",
-        "autoreset": f"`{env_spec.autoreset}`",
-        "disable_env_checker": f"`{env_spec.disable_env_checker}`",
-        "kwargs": f"`{env_spec.kwargs}`",
-        "additional_wrappers": f"`{env_spec.additional_wrappers}`",
-        "vector_entry_point": f"`{env_spec.vector_entry_point}`",
-    })
+    md_dict.update(
+        {
+            "entry_point": f"`{env_spec.entry_point}`",
+            "max_episode_steps": str(env_spec.max_episode_steps),
+            "reward_threshold": str(env_spec.reward_threshold),
+            "nondeterministic": f"`{env_spec.nondeterministic}`",
+            "order_enforce": f"`{env_spec.order_enforce}`",
+            "autoreset": f"`{env_spec.autoreset}`",
+            "disable_env_checker": f"`{env_spec.disable_env_checker}`",
+            "kwargs": f"`{env_spec.kwargs}`",
+            "additional_wrappers": f"`{env_spec.additional_wrappers}`",
+            "vector_entry_point": f"`{env_spec.vector_entry_point}`",
+        }
+    )
 
     return {k: str(v) for k, v in md_dict.items()}
 
 
 def get_dataset_spec_dict(
-        dataset_spec: Dict,
-        print_version: bool = False
+    dataset_spec: Dict, print_version: bool = False
 ) -> Dict[str, str]:
     """Create dict of the dataset specs, including observation and action space."""
     code_link = dataset_spec["code_permalink"]
     action_space = dataset_spec.get("action_space")
     obs_space = dataset_spec.get("observation_space")
-    version = dataset_spec['minari_version']
+    version = dataset_spec["minari_version"]
 
     md_dict = {
         "Total Steps": str(dataset_spec["total_steps"]),
@@ -645,21 +671,27 @@ def get_dataset_spec_dict(
     }
 
     if obs_space is not None:
+        if isinstance(obs_space, (dict, str)):
+            obs_space = deserialize_space(obs_space)
         dataset_observation_space = obs_space.__repr__().replace("\n", "")
         md_dict["Dataset Observation Space"] = f"`{dataset_observation_space}`"
 
     if action_space is not None:
+        if isinstance(action_space, (dict, str)):
+            action_space = deserialize_space(action_space)
         dataset_action_space = action_space.__repr__().replace("\n", "")
         md_dict["Dataset Action Space"] = f"`{dataset_action_space}`"
 
-    add_version = f" ({__version__} installed)"
-    md_dict.update({
-        "Algorithm": dataset_spec["algorithm_name"],
-        "Author": dataset_spec["author"],
-        "Email": dataset_spec["author_email"],
-        "Code Permalink": f"[{code_link}]({code_link})",
-        "Minari Version": f"{version} {add_version if print_version else ''}",
-        "Download": f"`minari.download_dataset(\"{dataset_spec['dataset_id']}\")`"
-    })
+    add_version = f" (`{__version__}` installed)"
+    md_dict.update(
+        {
+            "Algorithm": dataset_spec.get("algorithm_name", "Not provided"),
+            "Author": dataset_spec.get("author", "Not provided"),
+            "Email": dataset_spec.get("author_email", "Not provided"),
+            "Code Permalink": f"[{code_link}]({code_link})",
+            "Minari Version": f"`{version}` {add_version if print_version else ''}",
+            "Download": f"`minari download {dataset_spec['dataset_id']}`",
+        }
+    )
 
     return md_dict

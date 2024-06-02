@@ -25,6 +25,8 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.21.0",
+    "jax[cpu]",
+    "pyarrow",
     "h5py>=3.8.0",
     "tqdm>=4.65.0",
     "typing_extensions>=4.4.0",
@@ -41,7 +43,9 @@ dynamic = ["version"]
 testing = [
     "pytest>=7.1.3",
     "gymnasium-robotics>=1.2.3",
-    "mktestdocs"
+    "mktestdocs",
+    "torchrl",
+    "agilerl"
 ]
 
 [project.urls]
@@ -64,7 +68,7 @@ include = ["minari", "minari.*"]
 
 [tool.black]
 safe = true
-force-exclude = ["docs/tutorials/using_datasets/behavioral_cloning.py"]
+force-exclude = "docs/tutorials/"
 
 [tool.isort]
 atomic = true
@@ -105,6 +109,12 @@ reportPrivateUsage = "warning"
 reportUnboundVariable = "warning"
 
 [tool.pytest.ini_options]
-filterwarnings = ['ignore:.*The environment .* is out of date.*']
+filterwarnings = [
+#    'ignore:.*The environment .* is out of date',
+    'ignore:.*`eval_env` is set to None',
+    "ignore:.*`minari_version` is set to None",
+    "ignore:.*`description` is set to None",
+    "ignore:.*`code_permalink` is set to None"
+]
 # filterwarnings = ['ignore:.*step API.*:DeprecationWarning']
 addopts = ["--ignore=docs/tutorials"]

@@ -1,4 +1,3 @@
-import copy
 import json
 import os
 import re
@@ -9,8 +8,9 @@ import numpy as np
 import pytest
 
 import minari
-from minari import DataCollector, MinariDataset
-from minari.dataset.minari_dataset import EpisodeData
+from minari import DataCollector, EpisodeData, MinariDataset, StepData
+from minari.data_collector.episode_buffer import EpisodeBuffer
+from minari.dataset._storages import registry as storage_registry
 from minari.dataset.minari_storage import METADATA_FILE_NAME
 from tests.common import (
     check_data_integrity,
@@ -18,12 +18,8 @@ from tests.common import (
     check_episode_data_integrity,
     check_load_and_delete_dataset,
     create_dummy_dataset_with_collecter_env_helper,
-    register_dummy_envs,
     test_spaces,
 )
-
-
-register_dummy_envs()
 
 
 @pytest.mark.parametrize("space", test_spaces)
@@ -44,7 +40,7 @@ def test_episode_data(space: gym.Space):
         rewards=rewards,
         terminations=terminations,
         truncations=truncations,
-        infos={},
+        infos={"info": True},
     )
 
     pattern = r"EpisodeData\("
@@ -72,15 +68,17 @@ def test_episode_data(space: gym.Space):
         ("dummy-tuple-discrete-box-test-v0", "DummyTupleDiscreteBoxEnv-v0"),
     ],
 )
-def test_update_dataset_from_collector_env(dataset_id, env_id):
-
+@pytest.mark.parametrize("data_format", storage_registry.keys())
+def test_update_dataset_from_collector_env(
+    dataset_id, env_id, data_format, register_dummy_envs
+):
     local_datasets = minari.list_local_datasets()
     if dataset_id in local_datasets:
         minari.delete_dataset(dataset_id)
 
     env = gym.make(env_id)
 
-    env = DataCollector(env)
+    env = DataCollector(env, data_format=data_format)
     num_episodes = 10
 
     dataset = create_dummy_dataset_with_collecter_env_helper(
@@ -125,7 +123,10 @@ def test_update_dataset_from_collector_env(dataset_id, env_id):
         ("dummy-tuple-discrete-box-test-v0", "DummyTupleDiscreteBoxEnv-v0"),
     ],
 )
-def test_filter_episodes_and_subsequent_updates(dataset_id, env_id):
+@pytest.mark.parametrize("data_format", storage_registry.keys())
+def test_filter_episodes_and_subsequent_updates(
+    dataset_id, env_id, data_format, register_dummy_envs
+):
     """Tests to make sure that episodes are filtered filtered correctly.
 
     Additionally ensures indices are correctly updated when adding more episodes to a filtered dataset.
@@ -136,7 +137,7 @@ def test_filter_episodes_and_subsequent_updates(dataset_id, env_id):
 
     env = gym.make(env_id)
 
-    env = DataCollector(env)
+    env = DataCollector(env, data_format=data_format)
     num_episodes = 10
 
     dataset = create_dummy_dataset_with_collecter_env_helper(
@@ -205,48 +206,31 @@ def test_filter_episodes_and_subsequent_updates(dataset_id, env_id):
     env = gym.make(env_id)
     buffer = []
 
-    observations = []
-    actions = []
-    rewards = []
-    terminations = []
-    truncations = []
-
     num_episodes = 10
+    seed = 42
+    observation, _ = env.reset(seed=seed)
+    episode_buffer = EpisodeBuffer(observations=observation, seed=seed)
 
-    observation, info = env.reset(seed=42)
-
-    observation, _ = env.reset()
-    observations.append(observation)
     for episode in range(num_episodes):
         terminated = False
         truncated = False
 
         while not terminated and not truncated:
-            action = env.action_space.sample()  # User-defined policy function
+            action = env.action_space.sample()
             observation, reward, terminated, truncated, _ = env.step(action)
-            observations.append(observation)
-            actions.append(action)
-            rewards.append(reward)
-            terminations.append(terminated)
-            truncations.append(truncated)
+            step_data: StepData = {
+                "observation": observation,
+                "action": action,
+                "reward": reward,
+                "termination": terminated,
+                "truncation": truncated,
+                "info": {},
+            }
+            episode_buffer = episode_buffer.add_step_data(step_data)
 
-        episode_buffer = {
-            "observations": copy.deepcopy(observations),
-            "actions": copy.deepcopy(actions),
-            "rewards": np.asarray(rewards),
-            "terminations": np.asarray(terminations),
-            "truncations": np.asarray(truncations),
-        }
         buffer.append(episode_buffer)
-
-        observations.clear()
-        actions.clear()
-        rewards.clear()
-        terminations.clear()
-        truncations.clear()
-
         observation, _ = env.reset()
-        observations.append(observation)
+        episode_buffer = EpisodeBuffer(observations=observation)
 
     filtered_dataset.update_dataset_from_buffer(buffer)
 
@@ -304,14 +288,15 @@ def test_filter_episodes_and_subsequent_updates(dataset_id, env_id):
         ("dummy-tuple-discrete-box-test-v0", "DummyTupleDiscreteBoxEnv-v0"),
     ],
 )
-def test_sample_episodes(dataset_id, env_id):
+@pytest.mark.parametrize("data_format", storage_registry.keys())
+def test_sample_episodes(dataset_id, env_id, data_format, register_dummy_envs):
     local_datasets = minari.list_local_datasets()
     if dataset_id in local_datasets:
         minari.delete_dataset(dataset_id)
 
     env = gym.make(env_id)
 
-    env = DataCollector(env)
+    env = DataCollector(env, data_format=data_format)
     num_episodes = 10
 
     dataset = create_dummy_dataset_with_collecter_env_helper(
@@ -337,7 +322,7 @@ def test_sample_episodes(dataset_id, env_id):
 
 
 @pytest.mark.parametrize(
-    "dataset_id,env_id",
+    "dataset_id, env_id",
     [
         ("cartpole-test-v0", "CartPole-v1"),
         ("dummy-dict-test-v0", "DummyDictEnv-v0"),
@@ -347,14 +332,15 @@ def test_sample_episodes(dataset_id, env_id):
         ("dummy-tuple-discrete-box-test-v0", "DummyTupleDiscreteBoxEnv-v0"),
     ],
 )
-def test_iterate_episodes(dataset_id, env_id):
+@pytest.mark.parametrize("data_format", storage_registry.keys())
+def test_iterate_episodes(dataset_id, env_id, data_format, register_dummy_envs):
     local_datasets = minari.list_local_datasets()
     if dataset_id in local_datasets:
         minari.delete_dataset(dataset_id)
 
     env = gym.make(env_id)
 
-    env = DataCollector(env)
+    env = DataCollector(env, data_format=data_format)
     num_episodes = 10
 
     dataset = create_dummy_dataset_with_collecter_env_helper(
@@ -395,15 +381,17 @@ def test_iterate_episodes(dataset_id, env_id):
         ("dummy-tuple-discrete-box-test-v0", "DummyTupleDiscreteBoxEnv-v0"),
     ],
 )
-def test_update_dataset_from_buffer(dataset_id, env_id):
-
+@pytest.mark.parametrize("data_format", storage_registry.keys())
+def test_update_dataset_from_buffer(
+    dataset_id, env_id, data_format, register_dummy_envs
+):
     local_datasets = minari.list_local_datasets()
     if dataset_id in local_datasets:
         minari.delete_dataset(dataset_id)
 
     env = gym.make(env_id)
 
-    collector_env = DataCollector(env)
+    collector_env = DataCollector(env, data_format=data_format)
     num_episodes = 10
 
     dataset = create_dummy_dataset_with_collecter_env_helper(
@@ -412,48 +400,32 @@ def test_update_dataset_from_buffer(dataset_id, env_id):
 
     buffer = []
 
-    observations = []
-    actions = []
-    rewards = []
-    terminations = []
-    truncations = []
-
     num_episodes = 10
+    seed = 42
+    observation, _ = env.reset(seed=seed)
+    episode_buffer = EpisodeBuffer(observations=observation, seed=seed)
 
-    observation, info = env.reset(seed=42)
-
-    observation, _ = env.reset()
-    observations.append(observation)
     for episode in range(num_episodes):
         terminated = False
         truncated = False
 
         while not terminated and not truncated:
-            action = env.action_space.sample()  # User-defined policy function
+            action = env.action_space.sample()
             observation, reward, terminated, truncated, _ = env.step(action)
-            observations.append(observation)
-            actions.append(action)
-            rewards.append(reward)
-            terminations.append(terminated)
-            truncations.append(truncated)
+            step_data: StepData = {
+                "observation": observation,
+                "action": action,
+                "reward": reward,
+                "termination": terminated,
+                "truncation": truncated,
+                "info": {},
+            }
+            episode_buffer = episode_buffer.add_step_data(step_data)
 
-        episode_buffer = {
-            "observations": copy.deepcopy(observations),
-            "actions": copy.deepcopy(actions),
-            "rewards": np.asarray(rewards),
-            "terminations": np.asarray(terminations),
-            "truncations": np.asarray(truncations),
-        }
         buffer.append(episode_buffer)
 
-        observations.clear()
-        actions.clear()
-        rewards.clear()
-        terminations.clear()
-        truncations.clear()
-
         observation, _ = env.reset()
-        observations.append(observation)
+        episode_buffer = EpisodeBuffer(observations=observation)
 
     dataset.update_dataset_from_buffer(buffer)
 
@@ -469,11 +441,12 @@ def test_update_dataset_from_buffer(dataset_id, env_id):
     check_load_and_delete_dataset(dataset_id)
 
 
-def test_missing_env_module():
+@pytest.mark.parametrize("data_format", storage_registry.keys())
+def test_missing_env_module(data_format):
     dataset_id = "dummy-test-v0"
 
     env = gym.make("CartPole-v1")
-    env = DataCollector(env)
+    env = DataCollector(env, data_format=data_format)
     num_episodes = 10
 
     dataset = create_dummy_dataset_with_collecter_env_helper(
@@ -483,7 +456,9 @@ def test_missing_env_module():
     path = os.path.join(dataset.storage.data_path, METADATA_FILE_NAME)
     with open(path) as file:
         metadata = json.load(file)
-    metadata["env_spec"] = r"""{
+    metadata[
+        "env_spec"
+    ] = r"""{
         "id": "DummyEnv-v0",
         "entry_point": "dummymodule:dummyenv",
         "reward_threshold": null,

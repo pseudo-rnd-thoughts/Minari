@@ -3,17 +3,15 @@ import numpy as np
 import pytest
 
 from minari import DataCollector, EpisodeData, MinariDataset, StepDataCallback
+from minari.dataset._storages import registry as storage_registry
 from tests.common import (
     check_infos_equal,
     check_load_and_delete_dataset,
     get_info_at_step_index,
-    register_dummy_envs,
 )
 
 
 MAX_UINT64 = np.iinfo(np.uint64).max
-
-register_dummy_envs()
 
 
 class ForceTruncateStepDataCallback(StepDataCallback):
@@ -25,10 +23,10 @@ class ForceTruncateStepDataCallback(StepDataCallback):
 
     def __call__(self, env, **kwargs):
         step_data = super().__call__(env, **kwargs)
-
-        step_data["terminations"] = False
-        if self.time_steps % self.episode_steps == 0:
-            step_data["truncations"] = True
+        if self.time_steps != 0:
+            step_data["termination"] = False
+            if self.time_steps % self.episode_steps == 0:
+                step_data["truncation"] = True
 
         self.time_steps += 1
         return step_data
@@ -93,6 +91,7 @@ def get_single_step_from_episode(episode: EpisodeData, index: int) -> EpisodeDat
     return EpisodeData(**step_data)
 
 
+@pytest.mark.parametrize("data_format", storage_registry.keys())
 @pytest.mark.parametrize(
     "dataset_id,env_id",
     [
@@ -103,7 +102,7 @@ def get_single_step_from_episode(episode: EpisodeData, index: int) -> EpisodeDat
         ("dummy-tuple-discrete-box-test-v0", "DummyTupleDiscreteBoxEnv-v0"),
     ],
 )
-def test_truncation_without_reset(dataset_id, env_id):
+def test_truncation_without_reset(dataset_id, env_id, data_format, register_dummy_envs):
     """Test new episode creation when environment is truncated and env.reset is not called."""
     num_steps = 50
     num_episodes = int(num_steps / ForceTruncateStepDataCallback.episode_steps)
@@ -112,6 +111,7 @@ def test_truncation_without_reset(dataset_id, env_id):
         env,
         step_data_callback=ForceTruncateStepDataCallback,
         record_infos=True,
+        data_format=data_format,
     )
 
     env.reset()
@@ -154,14 +154,15 @@ def test_truncation_without_reset(dataset_id, env_id):
     check_load_and_delete_dataset(dataset_id)
 
 
+@pytest.mark.parametrize("data_format", storage_registry.keys())
 @pytest.mark.parametrize("seed", [None, 0, 42, MAX_UINT64])
-def test_reproducibility(seed):
+def test_reproducibility(seed, data_format, register_dummy_envs):
     """Test episodes are reproducible, even if an explicit reset seed is not set."""
     dataset_id = "dummy-box-test-v0"
     env_id = "DummyBoxEnv-v0"
     num_episodes = 5
 
-    env = DataCollector(gym.make(env_id))
+    env = DataCollector(gym.make(env_id), data_format=data_format)
 
     for _ in range(num_episodes):
         env.reset(seed=seed)
